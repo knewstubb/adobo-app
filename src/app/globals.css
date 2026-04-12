@@ -1,26 +1,173 @@
 @import "tailwindcss";
 
+/* Linear Design System Tokens */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Surfaces */
+  --linear-bg-app: 24 25 33;
+  --linear-bg-sidebar: 25 26 35;
+  --linear-bg-header: 33 35 46;
+  --linear-bg-elevated: 29 30 43;
+  --linear-bg-button: 41 42 53;
+
+  /* Borders */
+  --linear-border-default: 44 45 60;
+  --linear-border-subtle: 33 34 52;
+  --linear-border-button: 57 58 75;
+  --linear-border-modal: 82 82 111;
+  --linear-border-focus: 49 50 72;
+
+  /* Text */
+  --linear-text-primary: 238 239 252;
+  --linear-text-secondary: 210 211 224;
+  --linear-text-muted: 160 161 178;
+
+  /* Functional */
+  --background: rgb(var(--linear-bg-app));
+  --foreground: rgb(var(--linear-text-primary));
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+  /* Surface colors */
+  --color-surface-app: rgb(var(--linear-bg-app));
+  --color-surface-sidebar: rgb(var(--linear-bg-sidebar));
+  --color-surface-header: rgb(var(--linear-bg-header));
+  --color-surface-elevated: rgb(var(--linear-bg-elevated));
+  --color-surface-button: rgb(var(--linear-bg-button));
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  /* Border colors */
+  --color-border-default: rgb(var(--linear-border-default));
+  --color-border-subtle: rgb(var(--linear-border-subtle));
+  --color-border-button: rgb(var(--linear-border-button));
+  --color-border-modal: rgb(var(--linear-border-modal));
+  --color-border-focus: rgb(var(--linear-border-focus));
+
+  /* Text colors */
+  --color-text-primary: rgb(var(--linear-text-primary));
+  --color-text-secondary: rgb(var(--linear-text-secondary));
+  --color-text-muted: rgb(var(--linear-text-muted));
+
+  --font-sans: var(--font-inter), "Inter", system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono);
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-inter), "Inter", system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Linear-style interaction utilities */
+@layer utilities {
+  .linear-btn {
+    transition: all 0.15s ease;
+  }
+  .linear-btn:hover {
+    opacity: 0.85;
+  }
+  .linear-btn:active {
+    transform: scale(0.97);
+  }
+}
+
+/* Modal animation */
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes zoomIn95 { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+
+.animate-in { animation: fadeIn 0.2s ease, zoomIn95 0.2s ease; }
+
+/* Linear pill button style */
+.linear-pill {
+  background: rgb(89, 89, 116);
+  border: 0.5px solid rgb(82, 82, 111);
+  border-radius: 4px;
+  padding: 4.5px 8px;
+  font-size: 12px;
+  line-height: 14.5px;
+  color: rgb(210, 211, 224);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  box-shadow: 0px 1px 1px 0px rgba(0, 0, 0, 0.15);
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+.linear-pill:hover { opacity: 0.85; }
+.linear-pill:active { transform: scale(0.97); }
+
+/* Linear input field style */
+.linear-input {
+  background: rgb(29, 30, 43);
+  border: 1px solid rgb(57, 58, 75);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: rgb(238, 239, 252);
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  width: 100%;
+}
+.linear-input::placeholder {
+  color: rgb(160, 161, 178);
+}
+.linear-input:focus {
+  border-color: rgb(87, 91, 199);
+  box-shadow: 0 0 0 2px rgba(87, 91, 199, 0.2);
+}
+.linear-input:hover:not(:focus) {
+  border-color: rgb(82, 82, 111);
+}
+
+/* Linear select (dropdown) style */
+select.linear-input {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='rgb(160,161,178)' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 28px;
+  cursor: pointer;
+}
+
+/* Linear textarea style */
+textarea.linear-input {
+  resize: vertical;
+  min-height: 120px;
+}
+
+/* Hide scrollbar but keep scrollable */
+@layer utilities {
+  .scrollbar-hide {
+    -ms-overflow-style: none !important;
+    scrollbar-width: none !important;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none !important;
+  }
+}
+
+/* Dark scrollbars — Linear style */
+* {
+  scrollbar-color: rgb(var(--linear-border-default)) transparent;
+  scrollbar-width: thin;
+}
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--linear-border-default));
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--linear-border-button));
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
