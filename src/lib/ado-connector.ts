@@ -496,7 +496,7 @@ export async function createWorkItem(
 
   const typeEncoded = encodeURIComponent(workItemType);
   const res = await fetch(
-    adoUrl(creds, `wit/workitems/${typeEncoded}?api-version=7.1`),
+    adoUrl(creds, `wit/workitems/$${typeEncoded}?api-version=7.1`),
     {
       method: "POST",
       headers: {

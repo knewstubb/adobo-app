@@ -32,6 +32,7 @@ import { CredentialSettings } from "./CredentialSettings";
 import { CustomiseMenu } from "./CustomiseMenu";
 import { UndoRedoProvider } from "@/lib/undo-redo-context";
 import { UndoRedoToolbar } from "./UndoRedoToolbar";
+import { UpdateNotification } from "./UpdateNotification";
 import type { HistoryEntry } from "@/lib/history-manager";
 import { type ColKey, readColumnSettings, GANTT_COL_KEY, LIST_COL_KEY, GANTT_DEFAULT_COLUMNS, LIST_DEFAULT_COLUMNS } from "./ColumnsMenu";
 import {
@@ -1068,6 +1069,7 @@ export function AppLayout({ initial }: { initial: AppData }) {
         />
       )}
     </div>
+    <UpdateNotification />
     </UndoRedoProvider>
   );
 }
