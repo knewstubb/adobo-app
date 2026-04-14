@@ -4,6 +4,7 @@ import type { MutableRefObject } from "react";
 import type { WorkItem, Iteration, GroupingDimension } from "@/lib/types";
 import { GanttChart } from "./GanttChart";
 import type { IterationMarker, TimelineRange } from "@/lib/timeline-positioning";
+import type { ColKey } from "./ColumnsMenu";
 
 interface TimelineViewProps {
   items: WorkItem[];
@@ -21,6 +22,7 @@ interface TimelineViewProps {
   zoomWidth?: number;
   onScrollToTodayRef?: MutableRefObject<(() => void) | null>;
   onZoom?: (delta: number) => void;
+  visibleColumns?: ColKey[];
 }
 
 export function TimelineView({
@@ -38,6 +40,7 @@ export function TimelineView({
   zoomWidth,
   onScrollToTodayRef,
   onZoom,
+  visibleColumns,
 }: TimelineViewProps) {
   if (!range || markers.length === 0) {
     return (
@@ -63,6 +66,7 @@ export function TimelineView({
       zoomWidth={zoomWidth}
       onScrollToTodayRef={onScrollToTodayRef}
       onZoom={onZoom}
+      visibleColumns={visibleColumns}
     />
   );
 }

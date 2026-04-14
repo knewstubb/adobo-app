@@ -5,11 +5,30 @@ import type { WorkItem, Iteration } from "@/lib/types";
 import { STATE_COLOURS } from "@/lib/types";
 import type { IterationMarker, TimelineRange, DayMarker } from "@/lib/timeline-positioning";
 import { computeDayMarkers, computeTodayPercent, findIterationForDate } from "@/lib/timeline-positioning";
-import { buildGanttTree, flattenGanttTree, type GanttRow, type FlatRow, type AddRow } from "@/lib/gantt-tree";
-import { CaretRight, CaretDown, DotOutline, Asterisk, CrownSimple, Trophy, ListChecks, ClipboardText, DotsSixVertical, Plus, Bug } from "@phosphor-icons/react";
+import { buildGanttTree, flattenGanttTree, type GanttRow, type FlatRow } from "@/lib/gantt-tree";
+import { CaretRight, CaretDown, DotOutline, Asterisk, CrownSimple, Trophy, ListChecks, ClipboardText, Bug, Plus } from "@phosphor-icons/react";
+import { SUMMARY_TYPES, getChildType } from "@/lib/hierarchy";
 import { computeDropTarget, canDrop, type DropTarget } from "@/lib/reorder-logic";
+import type { ColKey } from "./ColumnsMenu";
+import { COL_LABELS } from "./ColumnsMenu";
 
-const ROW_H = 36, HDR_H = 52, L_DEF = 340, L_MIN = 200, L_MAX = 600, IND = 20, HW = 6;
+const ROW_H = 36, HDR_H = 52, L_DEF = 340, L_MIN = 200, L_MAX = 9999, IND = 20, HW = 6;
+
+/** Min widths for Gantt sidebar columns */
+const GANTT_COL_MIN: Record<ColKey, number> = {
+  title: 120, order: 40, status: 60, assignee: 60, effort: 40, tags: 60, iteration: 60, id: 50,
+};
+
+/** Default pixel widths for Gantt sidebar columns */
+const GANTT_COL_INITIAL: Record<ColKey, number> = {
+  title: 320, order: 55, status: 100, assignee: 90, effort: 45, tags: 90, iteration: 85, id: 60,
+};
+
+const GANTT_COL_INITIAL_ORDER: ColKey[] = ["title", "order", "status", "assignee", "effort", "tags", "iteration", "id"];
+
+const GANTT_WIDTHS_KEY = "gantt-sidebar-col-widths";
+const GANTT_ORDER_KEY = "gantt-sidebar-col-order";
+const GANTT_PANEL_KEY = "gantt-panel-width";
 type DragMode = "move" | "resize-left" | "resize-right";
 interface DragState { id: number; m: DragMode; sx: number; sy: number; ol: number; ow: number; cw: number; moved: boolean }
 
@@ -28,6 +47,7 @@ interface GanttChartProps {
   zoomWidth?: number;
   onScrollToTodayRef?: MutableRefObject<(() => void) | null>;
   onZoom?: (delta: number) => void;
+  visibleColumns?: ColKey[];
 }
 
 /** Find which day column a percent position falls in */
@@ -46,9 +66,14 @@ function findDayAtPercent(days: DayMarker[], pct: number): DayMarker | null {
   return best;
 }
 
-export function GanttChart({ items, iterations, markers, range, onItemClick, onScheduleChange, onReorder, onCreateItem, onContextMenu, pendingIds, showWeekends = false, zoomWidth = 100, onScrollToTodayRef, onZoom }: GanttChartProps) {
+export function GanttChart({ items, iterations, markers, range, onItemClick, onScheduleChange, onReorder, onCreateItem, onContextMenu, pendingIds, showWeekends = false, zoomWidth = 100, onScrollToTodayRef, onZoom, visibleColumns }: GanttChartProps) {
   const [col, setCol] = useState<Set<number>>(new Set());
-  const [lw, setLw] = useState(L_DEF);
+  const [lw, setLw] = useState(() => {
+    if (typeof window !== "undefined") {
+      try { const s = localStorage.getItem(GANTT_PANEL_KEY); if (s) { const v = JSON.parse(s); if (typeof v === "number" && v >= L_MIN) return v; } } catch {}
+    }
+    return L_DEF;
+  });
   const pr = useRef<{ sx: number; sw: number } | null>(null);
   const br = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -57,11 +82,15 @@ export function GanttChart({ items, iterations, markers, range, onItemClick, onS
   const [dOff, setDOff] = useState(0);
   const [dOffY, setDOffY] = useState(0);
   const [highlightDayIdx, setHighlightDayIdx] = useState<number | null>(null);
-  const [vDragId, setVDragId] = useState<number | null>(null);
-  const [vDragY, setVDragY] = useState(0);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
-  const [hoveredRow, setHoveredRow] = useState<number | null>(null);
+  const [hoveredItemId, setHoveredItemId] = useState<number | null>(null);
+  const [selectedItemId, setSelectedItemId] = useState<number | null>(null);
   const dropTargetRef = useRef<DropTarget | null>(null);
+
+  // Sidebar row drag-and-drop state (mirrors ListView pattern)
+  const [sidebarDragId, setSidebarDragId] = useState<number | null>(null);
+  const [sidebarDropTargetId, setSidebarDropTargetId] = useState<number | null>(null);
+  const [sidebarDropPosition, setSidebarDropPosition] = useState<"above" | "below" | "inside" | null>(null);
   const leftScrollRef = useRef<HTMLDivElement>(null);
   const syncing = useRef(false);
 
@@ -91,6 +120,64 @@ export function GanttChart({ items, iterations, markers, range, onItemClick, onS
   const rows = useMemo(() => flattenGanttTree(tree, col), [tree, col]);
   const days = useMemo(() => range ? computeDayMarkers(range, showWeekends) : [], [range, showWeekends]);
   const todayPct = useMemo(() => range ? computeTodayPercent(range, showWeekends) : null, [range, showWeekends]);
+
+  // Extra sidebar columns (beyond title) from visibleColumns prop
+  const extraCols = useMemo(() => (visibleColumns ?? ["title"]).filter(c => c !== "title"), [visibleColumns]);
+
+  // --- Sidebar column widths & order (resizable + reorderable, persisted to localStorage) ---
+  const [sideColWidths, setSideColWidths] = useState<Record<ColKey, number>>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const s = localStorage.getItem(GANTT_WIDTHS_KEY);
+        if (s) {
+          const parsed = JSON.parse(s);
+          // Reset if title width is unreasonably small (stale from previous version)
+          if (parsed.title && parsed.title < GANTT_COL_MIN.title) parsed.title = GANTT_COL_INITIAL.title;
+          return parsed;
+        }
+      } catch {}
+    }
+    return GANTT_COL_INITIAL;
+  });
+  const [sideColOrder, setSideColOrder] = useState<ColKey[]>(() => {
+    if (typeof window !== "undefined") {
+      try { const s = localStorage.getItem(GANTT_ORDER_KEY); if (s) return JSON.parse(s); } catch {}
+    }
+    return GANTT_COL_INITIAL_ORDER;
+  });
+  const [isSideResizing, setIsSideResizing] = useState(false);
+
+  // Persist widths & order
+  useEffect(() => { try { localStorage.setItem(GANTT_WIDTHS_KEY, JSON.stringify(sideColWidths)); } catch {} }, [sideColWidths]);
+  useEffect(() => { try { localStorage.setItem(GANTT_ORDER_KEY, JSON.stringify(sideColOrder)); } catch {} }, [sideColOrder]);
+  useEffect(() => { try { localStorage.setItem(GANTT_PANEL_KEY, JSON.stringify(lw)); } catch {} }, [lw]);
+
+  // Effective column order: only columns that are in extraCols (visible), in the user's preferred order
+  const effectiveExtraCols = useMemo(() => sideColOrder.filter(k => k !== "title" && extraCols.includes(k)), [sideColOrder, extraCols]);
+
+  // Column resize handlers
+  const sideResizeRef = useRef<{ col: ColKey; startX: number; startW: number } | null>(null);
+
+  const onSideResizeDown = useCallback((e: React.PointerEvent, c: ColKey) => {
+    e.preventDefault(); e.stopPropagation();
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    sideResizeRef.current = { col: c, startX: e.clientX, startW: sideColWidths[c] };
+    setIsSideResizing(true);
+  }, [sideColWidths]);
+
+  const onSideResizeMove = useCallback((e: React.PointerEvent) => {
+    if (!sideResizeRef.current) return;
+    const { col: c, startX, startW } = sideResizeRef.current;
+    const delta = e.clientX - startX;
+    setSideColWidths(prev => ({ ...prev, [c]: Math.max(GANTT_COL_MIN[c], startW + delta) }));
+  }, []);
+
+  const onSideResizeUp = useCallback(() => { sideResizeRef.current = null; setIsSideResizing(false); }, []);
+
+  // Column drag-reorder state
+  const [sideDragCol, setSideDragCol] = useState<ColKey | null>(null);
+  const [sideDropCol, setSideDropCol] = useState<ColKey | null>(null);
+  const [sideDropSide, setSideDropSide] = useState<"left" | "right">("left");
 
   // Find the current sprint marker
   const currentSprintMarker = useMemo(() => {
@@ -191,6 +278,77 @@ export function GanttChart({ items, iterations, markers, range, onItemClick, onS
     document.addEventListener("mouseup", up);
   }, []);
 
+  // --- Sidebar row drag-and-drop handlers (same pattern as ListView) ---
+  const HIERARCHY_LEVEL: Record<string, number> = { Initiative: 0, Epic: 1, Feature: 2, "Product Backlog Item": 3, Bug: 3, Task: 3 };
+  const getHLevel = (type: string) => HIERARCHY_LEVEL[type] ?? 3;
+  const canBeDirectChildOf = (dragType: string, targetType: string) => getHLevel(targetType) === getHLevel(dragType) - 1;
+
+  function handleSidebarDragStart(e: React.DragEvent, item: WorkItem) {
+    setSidebarDragId(item.id);
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", String(item.id));
+  }
+
+  function handleSidebarDragOver(e: React.DragEvent, targetId: number) {
+    e.preventDefault();
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const y = e.clientY - rect.top, h = rect.height;
+    const t = items.find(i => i.id === targetId);
+    const dragItem = sidebarDragId ? items.find(i => i.id === sidebarDragId) : null;
+    if (!t || !dragItem || dragItem.id === t.id) {
+      setSidebarDropTargetId(null); setSidebarDropPosition(null); return;
+    }
+    const sameParent = dragItem.parentId === t.parentId;
+    const canNest = SUMMARY_TYPES.has(t.workItemType) && canBeDirectChildOf(dragItem.workItemType, t.workItemType);
+    let pos: "above" | "below" | "inside" | null = null;
+    if (y < h * 0.25 && sameParent) pos = "above";
+    else if (y > h * 0.75 && sameParent) pos = "below";
+    else if (canNest) pos = "inside";
+    else if (sameParent) pos = y < h * 0.5 ? "above" : "below";
+    if (pos) {
+      e.dataTransfer.dropEffect = "move";
+      setSidebarDropPosition(pos);
+      setSidebarDropTargetId(targetId);
+    } else {
+      e.dataTransfer.dropEffect = "none";
+      setSidebarDropPosition(null);
+      setSidebarDropTargetId(null);
+    }
+  }
+
+  function handleSidebarDrop(e: React.DragEvent) {
+    e.preventDefault();
+    if (!sidebarDragId || !sidebarDropTargetId || !onReorder || !sidebarDropPosition) return;
+    const t = items.find(i => i.id === sidebarDropTargetId);
+    const dragItem = items.find(i => i.id === sidebarDragId);
+    if (!t || !dragItem) return;
+    if (sidebarDropPosition === "inside") {
+      if (!canBeDirectChildOf(dragItem.workItemType, t.workItemType)) return;
+      const sibs = items.filter(i => i.parentId === sidebarDropTargetId).sort((a, b) => a.localSortOrder - b.localSortOrder);
+      const lastSib = sibs[sibs.length - 1];
+      onReorder(sidebarDragId, sidebarDropTargetId, lastSib ? lastSib.localSortOrder + 100 : 100, lastSib ? lastSib.id : 0, 0);
+    } else {
+      if (dragItem.parentId !== t.parentId) return;
+      const pid = t.parentId;
+      const sibs = items.filter(i => i.parentId === pid && i.id !== sidebarDragId).sort((a, b) => a.localSortOrder - b.localSortOrder);
+      const ti = sibs.findIndex(s => s.id === sidebarDropTargetId);
+      if (sidebarDropPosition === "above") {
+        const prevSib = ti > 0 ? sibs[ti - 1] : null;
+        const prev = prevSib ? prevSib.localSortOrder : 0;
+        const next = t.localSortOrder;
+        onReorder(sidebarDragId, pid, Math.floor((prev + next) / 2), prevSib ? prevSib.id : 0, t.id);
+      } else {
+        const nextSib = ti < sibs.length - 1 ? sibs[ti + 1] : null;
+        const prev = t.localSortOrder;
+        const next = nextSib ? nextSib.localSortOrder : prev + 200;
+        onReorder(sidebarDragId, pid, Math.floor((prev + next) / 2), t.id, nextSib ? nextSib.id : 0);
+      }
+    }
+    setSidebarDragId(null); setSidebarDropTargetId(null); setSidebarDropPosition(null);
+  }
+
+  function handleSidebarDragEnd() { setSidebarDragId(null); setSidebarDropTargetId(null); setSidebarDropPosition(null); }
+
   const tog = useCallback((id: number) => {
     setCol(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
   }, []);
@@ -201,151 +359,6 @@ export function GanttChart({ items, iterations, markers, range, onItemClick, onS
     const up = () => { pr.current = null; document.removeEventListener("mousemove", mv); document.removeEventListener("mouseup", up); };
     document.addEventListener("mousemove", mv); document.addEventListener("mouseup", up);
   }, [lw]);
-
-  // Vertical drag for reordering rows
-  const onVDragStart = useCallback((e: React.MouseEvent, itemId: number) => {
-    e.preventDefault(); e.stopPropagation();
-    const startY = e.clientY;
-    setVDragId(itemId);
-    setVDragY(0);
-
-    const fr = rows.find(r => r.type === 'item' && r.row.item.id === itemId);
-    const draggedRow = fr?.type === 'item' ? fr.row : undefined;
-    if (!draggedRow) return;
-
-    const mv = (ev: MouseEvent) => {
-      const deltaY = ev.clientY - startY;
-      setVDragY(deltaY);
-
-      // Compute drop target
-      const leftPanel = leftScrollRef.current;
-      if (leftPanel) {
-        const rect = leftPanel.getBoundingClientRect();
-        const cursorY = ev.clientY - rect.top;
-        // Map cursor Y to the flat row index (which includes add rows)
-        const adjustedY = cursorY + leftPanel.scrollTop;
-        let flatIdx = Math.floor(adjustedY / ROW_H);
-        // Clamp to valid range — if above all rows, target the first row
-        if (flatIdx < 0) flatIdx = 0;
-        if (flatIdx >= rows.length) flatIdx = rows.length - 1;
-        const flatRow = rows[flatIdx];
-        // Resolve to the nearest item row
-        let targetRow: GanttRow | null = null;
-        if (flatRow?.type === 'item') {
-          targetRow = flatRow.row;
-        } else if (flatRow?.type === 'add') {
-          // Dropping on an add row = drop inside that parent
-          const parentFr = rows.find(r => r.type === 'item' && r.row.item.id === flatRow.parentId);
-          targetRow = parentFr?.type === 'item' ? parentFr.row : null;
-        }
-
-        if (targetRow && targetRow.item.id !== draggedRow.item.id) {
-          const rowTop = flatIdx * ROW_H;
-          const relY = (adjustedY - rowTop) / ROW_H;
-
-          let position: "before" | "after" | "inside";
-          // If cursor is above all rows, force "before"
-          if (adjustedY < 0) {
-            position = "before";
-          } else if (flatRow?.type === 'add') {
-            position = "inside";
-          } else if (targetRow.isSummary) {
-            position = relY < 0.15 ? "before" : relY > 0.85 ? "after" : "inside";
-          } else {
-            position = relY < 0.5 ? "before" : "after";
-          }
-
-          // Validate and try alternatives
-          if (!canDrop(draggedRow, targetRow, position)) {
-            const alternatives: ("before" | "after" | "inside")[] =
-              position === "inside" ? ["after", "before"] :
-              position === "before" ? ["inside", "after"] :
-              ["inside", "before"];
-            let found = false;
-            for (const alt of alternatives) {
-              if (canDrop(draggedRow, targetRow, alt)) { position = alt; found = true; break; }
-            }
-            if (!found) { dropTargetRef.current = null; setDropTarget(null); return; }
-          }
-
-          // Compute new parent and sort order
-          const itemRows = rows.filter((r): r is { type: 'item'; row: GanttRow } => r.type === 'item').map(r => r.row);
-          // Get siblings in display order and assign sequential sort values
-          const siblings = itemRows.filter(r => r.item.parentId === (position === "inside" ? targetRow!.item.id : targetRow!.item.parentId) && r.item.id !== draggedRow.item.id);
-          let newParentId: number | null;
-          let newSortOrder: number;
-          let previousSiblingId = 0;
-          let nextSiblingId = 0;
-
-          if (position === "inside") {
-            newParentId = targetRow.item.id;
-            const lastChild = targetRow.children[targetRow.children.length - 1];
-            newSortOrder = lastChild ? lastChild.item.localSortOrder + 100 : 100;
-            previousSiblingId = lastChild ? lastChild.item.id : 0;
-          } else if (position === "before") {
-            newParentId = targetRow.item.parentId;
-            const sibIdx = siblings.findIndex(r => r.item.id === targetRow!.item.id);
-            const prevSib = sibIdx > 0 ? siblings[sibIdx - 1] : null;
-            // Place between previous sibling and target using display index
-            newSortOrder = prevSib
-              ? ((sibIdx - 1) * 100 + sibIdx * 100) / 2
-              : (sibIdx * 100) - 50;
-            previousSiblingId = prevSib ? prevSib.item.id : 0;
-            nextSiblingId = targetRow.item.id;
-          } else {
-            newParentId = targetRow.item.parentId;
-            const sibIdx = siblings.findIndex(r => r.item.id === targetRow!.item.id);
-            const nextSib = sibIdx < siblings.length - 1 ? siblings[sibIdx + 1] : null;
-            newSortOrder = nextSib
-              ? ((sibIdx + 1) * 100 + (sibIdx + 2) * 100) / 2
-              : (sibIdx + 1) * 100 + 50;
-            previousSiblingId = targetRow.item.id;
-            nextSiblingId = nextSib ? nextSib.item.id : 0;
-          }
-
-          const indicatorY = position === "before" ? flatIdx * ROW_H : (flatIdx + 1) * ROW_H;
-          // Ensure sort order is never exactly 0 to avoid no-op reorders
-          if (newSortOrder === 0) newSortOrder = position === "before" ? -50 : 50;
-          const target: DropTarget = { targetRow, position, newParentId, newSortOrder, indicatorY, previousSiblingId, nextSiblingId };
-          dropTargetRef.current = target;
-          setDropTarget(target);
-        } else {
-          dropTargetRef.current = null;
-          setDropTarget(null);
-        }
-      }
-    };
-
-    const up = () => {
-      document.removeEventListener("mousemove", mv);
-      document.removeEventListener("mouseup", up);
-
-      const currentTarget = dropTargetRef.current;
-      // Save scroll position before the reorder changes the tree
-      const savedScrollTop = leftScrollRef.current?.scrollTop ?? 0;
-      const savedRightScrollTop = scrollRef.current?.scrollTop ?? 0;
-
-      setVDragId(null);
-      setVDragY(0);
-      setDropTarget(null);
-      dropTargetRef.current = null;
-
-      if (currentTarget && onReorder) {
-        // If dropping inside a collapsed parent, keep it collapsed (item won't be visible)
-        // The col set already handles this since the parent ID is in it
-        onReorder(itemId, currentTarget.newParentId, currentTarget.newSortOrder, currentTarget.previousSiblingId, currentTarget.nextSiblingId);
-
-        // Restore scroll position after React re-renders
-        requestAnimationFrame(() => {
-          if (leftScrollRef.current) leftScrollRef.current.scrollTop = savedScrollTop;
-          if (scrollRef.current) scrollRef.current.scrollTop = savedRightScrollTop;
-        });
-      }
-    };
-
-    document.addEventListener("mousemove", mv);
-    document.addEventListener("mouseup", up);
-  }, [rows, onReorder]);
 
   // The key insight: on drag, find which day column the cursor is over using hit-testing.
   // No percent-to-date math needed. The day marker's date IS the answer.
@@ -383,10 +396,6 @@ export function GanttChart({ items, iterations, markers, range, onItemClick, onS
             let targetRow: GanttRow | null = null;
             if (targetFlatRow?.type === "item") {
               targetRow = targetFlatRow.row;
-            } else if (targetFlatRow?.type === "add") {
-              // Dropping on an add row = drop inside that parent
-              const parentFr = rows.find(r => r.type === "item" && r.row.item.id === targetFlatRow.parentId);
-              targetRow = parentFr?.type === "item" ? parentFr.row : null;
             }
 
             if (targetRow && targetRow.item.id !== draggedRow.item.id) {
@@ -394,10 +403,7 @@ export function GanttChart({ items, iterations, markers, range, onItemClick, onS
               
               // Determine drop position
               let position: "before" | "after" | "inside";
-              if (targetFlatRow?.type === "add") {
-                // Dropping on an add row always means "inside" the parent
-                position = "inside";
-              } else if (targetRow.isSummary) {
+              if (targetRow.isSummary) {
                 position = relY < 0.15 ? "before" : relY > 0.85 ? "after" : "inside";
               } else {
                 position = relY < 0.5 ? "before" : "after";
@@ -576,49 +582,111 @@ export function GanttChart({ items, iterations, markers, range, onItemClick, onS
 
   return (
     <div className="flex-1 flex overflow-hidden bg-surface-app">
-      <div className="flex-none border-r border-border-default flex flex-col" style={{ width: lw }}>
-        <div className="flex items-end justify-between px-3 pb-1 border-b border-border-default bg-surface-sidebar text-xs text-text-muted font-medium" style={{ height: HDR_H }}>
-          <span>Tasks</span>
-          <div className="flex items-center gap-1 pb-0.5">
-            <button onClick={() => {
-              // Expand one level: find shallowest collapsed depth and expand those
-              const allSummaryIds = new Map<number, number>(); // id -> depth
-              function walkTree(r: GanttRow) { if (r.isSummary) allSummaryIds.set(r.item.id, r.depth); r.children.forEach(walkTree); }
-              tree.forEach(r => walkTree(r));
-              const collapsedDepths = [...allSummaryIds.entries()].filter(([id]) => col.has(id)).map(([, d]) => d);
-              if (collapsedDepths.length === 0) return;
-              const minDepth = Math.min(...collapsedDepths);
-              setCol(prev => { const n = new Set(prev); for (const [id, d] of allSummaryIds) { if (d === minDepth) n.delete(id); } return n; });
-            }} className="text-zinc-500 hover:text-zinc-300 px-1" title="Expand one level">
-              <CaretDown size={10} />
-            </button>
-            <button onClick={() => {
-              // Collapse one level: find deepest expanded summary depth and collapse those
-              const allSummaryIds = new Map<number, number>();
-              function walkTree(r: GanttRow) { if (r.isSummary) allSummaryIds.set(r.item.id, r.depth); r.children.forEach(walkTree); }
-              tree.forEach(r => walkTree(r));
-              const expandedDepths = [...allSummaryIds.entries()].filter(([id]) => !col.has(id)).map(([, d]) => d);
-              if (expandedDepths.length === 0) return;
-              const maxDepth = Math.max(...expandedDepths);
-              setCol(prev => { const n = new Set(prev); for (const [id, d] of allSummaryIds) { if (d === maxDepth) n.add(id); } return n; });
-            }} className="text-zinc-500 hover:text-zinc-300 px-1" title="Collapse one level">
-              <CaretRight size={10} />
-            </button>
+      <div className="flex-none border-r border-border-default flex flex-col" style={{ width: lw, cursor: isSideResizing ? "col-resize" : undefined }}>
+        <div className="flex items-end border-b border-border-default bg-surface-sidebar text-xs text-text-muted font-medium select-none" style={{ height: HDR_H }} onPointerMove={onSideResizeMove} onPointerUp={onSideResizeUp}>
+          {/* w-6 spacer to match the plus-button column in rows */}
+          <div className="w-6 flex-shrink-0" />
+          {/* Title column header — takes remaining space */}
+          <div className="flex items-end justify-between flex-1 min-w-0 pb-1 px-1">
+            <span className="truncate">Tasks</span>
+            <div className="flex items-center gap-1 pb-0.5 flex-shrink-0">
+              <button onClick={() => {
+                const allSummaryIds = new Map<number, number>();
+                function walkTree(r: GanttRow) { if (r.isSummary) allSummaryIds.set(r.item.id, r.depth); r.children.forEach(walkTree); }
+                tree.forEach(r => walkTree(r));
+                const collapsedDepths = [...allSummaryIds.entries()].filter(([id]) => col.has(id)).map(([, d]) => d);
+                if (collapsedDepths.length === 0) return;
+                const minDepth = Math.min(...collapsedDepths);
+                setCol(prev => { const n = new Set(prev); for (const [id, d] of allSummaryIds) { if (d === minDepth) n.delete(id); } return n; });
+              }} className="text-zinc-500 hover:text-zinc-300 px-1" title="Expand one level">
+                <CaretDown size={10} />
+              </button>
+              <button onClick={() => {
+                const allSummaryIds = new Map<number, number>();
+                function walkTree(r: GanttRow) { if (r.isSummary) allSummaryIds.set(r.item.id, r.depth); r.children.forEach(walkTree); }
+                tree.forEach(r => walkTree(r));
+                const expandedDepths = [...allSummaryIds.entries()].filter(([id]) => !col.has(id)).map(([, d]) => d);
+                if (expandedDepths.length === 0) return;
+                const maxDepth = Math.max(...expandedDepths);
+                setCol(prev => { const n = new Set(prev); for (const [id, d] of allSummaryIds) { if (d === maxDepth) n.add(id); } return n; });
+              }} className="text-zinc-500 hover:text-zinc-300 px-1" title="Collapse one level">
+                <CaretRight size={10} />
+              </button>
+            </div>
           </div>
+          {/* Extra column headers — resizable + reorderable */}
+          {effectiveExtraCols.map(key => {
+            const showLeftLine = sideDropCol === key && sideDropSide === "left" && sideDragCol !== key;
+            const showRightLine = sideDropCol === key && sideDropSide === "right" && sideDragCol !== key;
+            return (
+              <div
+                key={key}
+                draggable={!isSideResizing}
+                onDragStart={e => { setSideDragCol(key); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", key); }}
+                onDragOver={e => {
+                  e.preventDefault();
+                  if (!sideDragCol || sideDragCol === key) return;
+                  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                  setSideDropCol(key);
+                  setSideDropSide((e.clientX - rect.left) < rect.width / 2 ? "left" : "right");
+                }}
+                onDrop={e => {
+                  e.preventDefault();
+                  if (!sideDragCol || sideDragCol === key) return;
+                  setSideColOrder(prev => {
+                    const n = prev.filter(c => c !== sideDragCol);
+                    const targetIdx = n.indexOf(key);
+                    n.splice(sideDropSide === "left" ? targetIdx : targetIdx + 1, 0, sideDragCol);
+                    return n;
+                  });
+                  setSideDragCol(null); setSideDropCol(null);
+                }}
+                onDragEnd={() => { setSideDragCol(null); setSideDropCol(null); }}
+                className={`relative flex items-end pb-1 px-1 flex-shrink-0 text-[10px] uppercase tracking-wider transition-colors ${
+                  isSideResizing ? "" : "cursor-grab active:cursor-grabbing hover:bg-surface-header/60"
+                } ${sideDragCol === key ? "opacity-40" : ""}`}
+                style={{ width: sideColWidths[key] }}
+              >
+                {showLeftLine && <div className="absolute left-0 top-1 bottom-1 w-[2px] bg-blue-500 rounded-full z-20" />}
+                {showRightLine && <div className="absolute right-0 top-1 bottom-1 w-[2px] bg-blue-500 rounded-full z-20" />}
+                {COL_LABELS[key]}
+                {/* Resize handle */}
+                <div
+                  className="absolute right-[-4px] top-0 bottom-0 w-[9px] z-30 flex items-center justify-center cursor-col-resize group/rh"
+                  onPointerDown={e => onSideResizeDown(e, key)}
+                  style={{ touchAction: "none" }}
+                >
+                  <div className="w-[2px] h-4 rounded-full bg-transparent group-hover/rh:bg-blue-500 transition-colors" />
+                </div>
+              </div>
+            );
+          })}
         </div>
-        <div ref={leftScrollRef} className="flex-1 overflow-y-auto overflow-x-hidden relative scrollbar-hide" onScroll={() => syncScroll("left")}>
+        <div ref={leftScrollRef} className="flex-1 overflow-y-auto overflow-x-auto relative scrollbar-hide" onScroll={() => syncScroll("left")}>
           {dropTarget && dropTarget.position !== "inside" && <div className="absolute left-0 right-0 z-20 pointer-events-none" style={{ top: dropTarget.indicatorY - 1 }}><div className="h-0.5 bg-blue-500" /></div>}
-          {rows.map((fr, i) => fr.type === "add" ? (
-            <AddRowBtn key={`add-${fr.parentId}-${fr.childType}`} row={fr} onCreate={onCreateItem} />
-          ) : (
-            <LRow key={fr.row.item.id} row={fr.row} c={col.has(fr.row.item.id)} onT={tog} onC={onItemClick} p={pendingIds?.has(fr.row.item.id)} onVD={onReorder ? onVDragStart : undefined} isVDragging={vDragId === fr.row.item.id} vDragDelta={vDragId === fr.row.item.id ? vDragY : 0} isDropTarget={dropTarget?.position === "inside" && dropTarget?.targetRow.item.id === fr.row.item.id} isHovered={hoveredRow === i} isSummaryBg={fr.row.isSummary} onHover={() => setHoveredRow(i)} onLeave={() => setHoveredRow(null)} onContextMenu={onContextMenu} />
+          {rows.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full px-4 py-12 text-center">
+              <p className="text-sm text-text-muted">No items to display.</p>
+              <p className="text-xs text-text-muted mt-1">Use the <span className="font-semibold text-text-secondary">+</span> button on a parent row or right-click for the context menu to create items.</p>
+            </div>
+          ) : rows.map((fr) => (
+            <LRow key={fr.row.item.id} row={fr.row} c={col.has(fr.row.item.id)} onT={tog} onC={(item) => { setSelectedItemId(item.id); onItemClick(item); }} p={pendingIds?.has(fr.row.item.id)} isDropTarget={dropTarget?.position === "inside" && dropTarget?.targetRow.item.id === fr.row.item.id} isHovered={hoveredItemId === fr.row.item.id} isSelected={selectedItemId === fr.row.item.id} isSummaryBg={fr.row.isSummary} onHover={() => setHoveredItemId(fr.row.item.id)} onLeave={() => setHoveredItemId(null)} onContextMenu={onContextMenu} onCreateItem={onCreateItem} extraCols={effectiveExtraCols} colWidths={sideColWidths}
+              isDragging={sidebarDragId === fr.row.item.id}
+              isRowDropTarget={sidebarDropTargetId === fr.row.item.id}
+              rowDropPosition={sidebarDropTargetId === fr.row.item.id ? sidebarDropPosition : null}
+              onDragStart={handleSidebarDragStart}
+              onDragOver={handleSidebarDragOver}
+              onDragLeave={() => { if (sidebarDropTargetId === fr.row.item.id) { setSidebarDropTargetId(null); setSidebarDropPosition(null); } }}
+              onDrop={handleSidebarDrop}
+              onDragEnd={handleSidebarDragEnd}
+            />
           ))}
         </div>
       </div>
       <div className="w-1 cursor-col-resize bg-surface-header hover:bg-blue-500 transition-colors flex-none" onMouseDown={onPD} />
       <div className="flex-1 flex flex-col overflow-hidden">
         <div ref={scrollRef} className="flex-1 overflow-auto" onScroll={() => { syncScroll("right"); }}>
-        <div style={{ width: `${zoomWidth}%`, minWidth: 800 }}>
+        <div style={{ width: `${zoomWidth}%`, minWidth: 400 }}>
           {/* Sticky header inside scroll container for pixel-perfect alignment */}
           <div className="sticky top-0 z-10 bg-surface-sidebar border-b border-border-default" style={{ height: HDR_H }}>
             {markers.map(m => {
@@ -649,7 +717,13 @@ export function GanttChart({ items, iterations, markers, range, onItemClick, onS
               </div>
             ))}
           </div>
-          <div ref={br} className="relative cursor-grab active:cursor-grabbing" style={{ height: th }} onMouseDown={onPanStart}>
+          <div ref={br} className="relative cursor-grab active:cursor-grabbing" style={{ height: th }} onMouseDown={onPanStart} onClick={(e) => { const target = e.target as HTMLElement; if (!target.closest("[data-bar]") && !target.closest("button")) setSelectedItemId(null); }}>
+            {/* Empty state overlay for timeline area */}
+            {rows.length === 0 && (
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                <p className="text-sm text-text-muted/50">No items scheduled</p>
+              </div>
+            )}
             {/* Layer 0: Current sprint highlight — 1px border lines + per-row tint applied in Layer 1 */}
             {currentSprintMarker && <>
               <div className="absolute top-0 bottom-0 pointer-events-none" style={{ left: `${currentSprintMarker.leftPercent}%`, width: 1, backgroundColor: "rgba(59, 130, 246, 0.25)" }} />
@@ -657,12 +731,14 @@ export function GanttChart({ items, iterations, markers, range, onItemClick, onS
             </>}
             {/* Layer 1: Row backgrounds (bottom) */}
             {rows.map((fr, i) => {
-              const isSummary = fr.type === "item" && fr.row.isSummary;
-              const isHov = hoveredRow === i;
-              return <div key={fr.type === "add" ? `bg-add-${fr.parentId}` : fr.row.item.id}
-                className={`absolute w-full transition-colors duration-75 ${isHov ? "bg-surface-header/60" : isSummary ? "bg-surface-sidebar" : ""}`}
+              const isSummary = fr.row.isSummary;
+              const isHov = hoveredItemId === fr.row.item.id;
+              const isSel = selectedItemId === fr.row.item.id;
+              return <div key={fr.row.item.id}
+                className={`absolute w-full transition-colors duration-75 cursor-default ${isSel ? "bg-blue-500/10" : isHov ? "bg-surface-header/60" : isSummary ? "bg-surface-sidebar" : ""}`}
                 style={{ top: i * ROW_H, height: ROW_H }}
-                onMouseEnter={() => setHoveredRow(i)} onMouseLeave={() => setHoveredRow(null)} />;
+                onMouseEnter={() => setHoveredItemId(fr.row.item.id)} onMouseLeave={() => setHoveredItemId(null)}
+                onClick={(e) => { e.stopPropagation(); setSelectedItemId(fr.row.item.id); }} />;
             })}
             {/* Layer 1b: Current sprint column tint — full height */}
             {currentSprintMarker && <div className="absolute top-0 pointer-events-none"
@@ -684,7 +760,7 @@ export function GanttChart({ items, iterations, markers, range, onItemClick, onS
             {/* Layer 3: Today line */}
             {todayPct !== null && <div className="absolute top-0 bottom-0 pointer-events-none" style={{ left: `${todayPct}%` }}><div className="w-0.5 h-full bg-red-500/70" /></div>}
             {/* Layer 4: Bars (top) */}
-            {rows.map((fr, i) => fr.type === "item" ? <BRow key={fr.row.item.id} row={fr.row} top={i * ROW_H} onC={onItemClick} p={pendingIds?.has(fr.row.item.id)} dp={gDP(fr.row)} iD={drag?.id === fr.row.item.id} wasDragged={drag?.id === fr.row.item.id && !!drag?.moved} onDS={onBD} cD={!!onScheduleChange && !fr.row.isSummary} isRowHovered={hoveredRow === i} onHover={() => setHoveredRow(i)} onLeave={() => setHoveredRow(null)} /> : null)}
+            {rows.map((fr, i) => <BRow key={fr.row.item.id} row={fr.row} top={i * ROW_H} onC={(item) => { setSelectedItemId(item.id); onItemClick(item); }} p={pendingIds?.has(fr.row.item.id)} dp={gDP(fr.row)} iD={drag?.id === fr.row.item.id} wasDragged={drag?.id === fr.row.item.id && !!drag?.moved} onDS={onBD} cD={!!onScheduleChange && !fr.row.isSummary} isRowHovered={hoveredItemId === fr.row.item.id} isSelected={selectedItemId === fr.row.item.id} onHover={() => setHoveredItemId(fr.row.item.id)} onLeave={() => setHoveredItemId(null)} onContextMenu={drag === null ? onContextMenu : undefined} />)}
           </div>
         </div>
         </div>
@@ -695,30 +771,102 @@ export function GanttChart({ items, iterations, markers, range, onItemClick, onS
 
 // Type icons handled inline with Phosphor
 
-function LRow({ row, c, onT, onC, p, onVD, isVDragging, vDragDelta, isDropTarget, isHovered, isSummaryBg, onHover, onLeave, onContextMenu }: { row: GanttRow; c: boolean; onT: (id: number) => void; onC: (i: WorkItem) => void; p?: boolean; onVD?: (e: React.MouseEvent, id: number) => void; isVDragging?: boolean; vDragDelta?: number; isDropTarget?: boolean; isHovered?: boolean; isSummaryBg?: boolean; onHover?: () => void; onLeave?: () => void; onContextMenu?: (item: WorkItem, x: number, y: number) => void }) {
-  const showCaret = row.isSummary || row.children.length > 0, bg = STATE_COLOURS[row.item.state] ?? "#6C757D";
-  return (
-    <div className={`flex items-center transition-colors duration-75 group ${isVDragging ? "opacity-50 bg-surface-header z-30 relative" : ""} ${isDropTarget ? "bg-blue-500/15 ring-1 ring-inset ring-blue-500/40" : isHovered ? "bg-surface-header/60" : isSummaryBg ? "bg-surface-sidebar" : ""}`} style={{ height: ROW_H, paddingLeft: row.depth * IND, transform: isVDragging && vDragDelta ? `translateY(${vDragDelta}px)` : undefined }} onMouseEnter={onHover} onMouseLeave={onLeave}>
-      {onVD && <div className={`w-4 h-5 flex items-center justify-center cursor-grab active:cursor-grabbing text-text-muted hover:text-text-secondary flex-shrink-0 transition-opacity ${isHovered ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`} onMouseDown={e => onVD(e, row.item.id)}><span className="text-[8px]">=</span></div>}
-      <button onClick={e => { e.stopPropagation(); if (showCaret) onT(row.item.id); }} className="w-5 h-5 flex items-center justify-center text-text-muted flex-shrink-0">
-        {showCaret ? (c ? <CaretRight size={10} /> : <CaretDown size={10} />) : <DotOutline size={10} className="text-border-default" />}
-      </button>
-      {<span className="mr-1 flex-shrink-0">
-        {row.item.workItemType === "Initiative" ? <Asterisk size={12} weight="bold" className="text-blue-500" /> : row.item.workItemType === "Epic" ? <CrownSimple size={12} weight="fill" className="text-orange-400" /> : row.item.workItemType === "Feature" ? <Trophy size={12} weight="fill" className="text-purple-400" /> : row.item.workItemType === "Task" ? <ClipboardText size={12} weight="fill" className="text-yellow-400" /> : row.item.workItemType === "Bug" ? <Bug size={12} weight="fill" className="text-red-500" /> : <ListChecks size={12} className="text-blue-400" />}
-      </span>}
+/** Render a single extra column value for the Gantt sidebar */
+function renderGanttSidebarCol(col: ColKey, item: WorkItem, stateBg: string) {
+  switch (col) {
+    case "status": {
+      const isOutline = item.state === "Ready";
+      return (
+        <span className="flex items-center gap-1 whitespace-nowrap">
+          <span className="w-2 h-2 rounded-full flex-shrink-0" style={isOutline ? { border: `1.5px solid ${stateBg}`, backgroundColor: "transparent" } : { backgroundColor: stateBg }} />
+          {item.state}
+        </span>
+      );
+    }
+    case "assignee":
+      return item.assignedTo ? item.assignedTo.split(" ")[0] : "–";
+    case "effort":
+      return item.effort != null ? String(item.effort) : "–";
+    case "tags":
+      return item.tags.length > 0 ? item.tags.join(", ") : "–";
+    case "iteration": {
+      const name = item.iterationPath?.split("\\").pop();
+      return name && name !== "Spark" ? name : "–";
+    }
+    case "order":
+      return String(item.localSortOrder);
+    case "id":
+      return `#${item.id}`;
+    default:
+      return null;
+  }
+}
 
-      <button onClick={() => onC(row.item)} onContextMenu={onContextMenu ? (e => { e.preventDefault(); onContextMenu(row.item, e.clientX, e.clientY); }) : undefined} className={`truncate text-left text-xs flex-1 min-w-0 cursor-pointer ${row.isSummary ? "font-semibold text-text-primary" : isHovered ? "text-text-primary" : "text-text-secondary hover:text-text-primary"}`} title={row.item.title}>{row.item.title}</button>
-      <span className={`text-[9px] px-1 rounded mr-2 flex-shrink-0 transition-opacity ${isHovered ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`} style={{ backgroundColor: `${bg}33`, color: bg }}>{row.item.state}</span>
+function LRow({ row, c, onT, onC, p, isDropTarget, isHovered, isSelected, isSummaryBg, onHover, onLeave, onContextMenu, onCreateItem, extraCols, colWidths, isDragging, isRowDropTarget, rowDropPosition, onDragStart, onDragOver, onDragLeave, onDrop, onDragEnd }: { row: GanttRow; c: boolean; onT: (id: number) => void; onC: (i: WorkItem) => void; p?: boolean; isDropTarget?: boolean; isHovered?: boolean; isSelected?: boolean; isSummaryBg?: boolean; onHover?: () => void; onLeave?: () => void; onContextMenu?: (item: WorkItem, x: number, y: number) => void; onCreateItem?: (parentId: number, workItemType: string) => void; extraCols?: ColKey[]; colWidths?: Record<ColKey, number>; isDragging?: boolean; isRowDropTarget?: boolean; rowDropPosition?: "above" | "below" | "inside" | null; onDragStart?: (e: React.DragEvent, item: WorkItem) => void; onDragOver?: (e: React.DragEvent, targetId: number) => void; onDragLeave?: () => void; onDrop?: (e: React.DragEvent) => void; onDragEnd?: () => void }) {
+  const showCaret = row.isSummary || row.children.length > 0, bg = STATE_COLOURS[row.item.state] ?? "#6C757D";
+  const childType = getChildType(row.item.workItemType);
+  const showPlus = !!onCreateItem && !!childType;
+  const childLabel = childType === "Product Backlog Item" ? "PBI" : childType;
+  return (
+    <div
+      draggable
+      onDragStart={onDragStart ? (e => onDragStart(e, row.item)) : undefined}
+      onDragOver={onDragOver ? (e => onDragOver(e, row.item.id)) : undefined}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
+      className={`relative flex items-center transition-colors duration-75 group cursor-default ${
+        isDragging ? "opacity-30" : ""
+      } ${isRowDropTarget && rowDropPosition === "inside" ? "bg-blue-500/10 ring-1 ring-inset ring-blue-500/30" : isDropTarget ? "bg-blue-500/15 ring-1 ring-inset ring-blue-500/40" : isSelected ? "bg-blue-500/10 ring-2 ring-inset ring-blue-500/50" : isHovered ? "bg-surface-header/60" : isSummaryBg ? "bg-surface-sidebar" : ""}`}
+      style={{ height: ROW_H }}
+      onMouseEnter={onHover} onMouseLeave={onLeave}
+      onContextMenu={onContextMenu ? (e => { e.preventDefault(); onContextMenu(row.item, e.clientX, e.clientY); }) : undefined}
+    >
+      {/* Drop indicators */}
+      {isRowDropTarget && rowDropPosition === "above" && <div className="absolute left-0 right-0 top-0 h-0.5 bg-blue-500 z-10" />}
+      {isRowDropTarget && rowDropPosition === "below" && <div className="absolute left-0 right-0 bottom-0 h-0.5 bg-blue-500 z-10" />}
+      {/* Plus_Button — far left, visible on hover, matching ListView w-6 container */}
+      <div className="w-6 flex-shrink-0 flex items-center justify-center">
+        {showPlus && (
+          <button
+            onClick={e => { e.stopPropagation(); onCreateItem!(row.item.id, childType!); }}
+            className="min-w-[24px] min-h-[24px] max-md:min-w-[32px] max-md:min-h-[32px] flex items-center justify-center rounded text-text-muted/0 group-hover:text-text-muted hover:!text-blue-400 hover:bg-blue-500/10 transition-all cursor-pointer"
+            title={`New ${childLabel}`}
+          >
+            <Plus size={10} weight="bold" />
+          </button>
+        )}
+      </div>
+
+      {/* Title area — takes remaining space */}
+      <div className="flex items-center gap-1 flex-1 min-w-0 pr-1" style={{ paddingLeft: row.depth * IND }}>
+        <button onClick={e => { e.stopPropagation(); if (showCaret) onT(row.item.id); }} className="w-5 h-5 flex items-center justify-center text-text-muted flex-shrink-0 cursor-pointer">
+          {showCaret ? (c ? <CaretRight size={10} /> : <CaretDown size={10} />) : <DotOutline size={10} className="text-border-default" />}
+        </button>
+        <span className="mr-1 flex-shrink-0">
+          {row.item.workItemType === "Initiative" ? <Asterisk size={12} weight="bold" className="text-blue-500" /> : row.item.workItemType === "Epic" ? <CrownSimple size={12} weight="fill" className="text-orange-400" /> : row.item.workItemType === "Feature" ? <Trophy size={12} weight="fill" className="text-purple-400" /> : row.item.workItemType === "Task" ? <ClipboardText size={12} weight="fill" className="text-yellow-400" /> : row.item.workItemType === "Bug" ? <Bug size={12} weight="fill" className="text-red-500" /> : <ListChecks size={12} className="text-blue-400" />}
+        </span>
+        <button onClick={() => onC(row.item)} onContextMenu={onContextMenu ? (e => { e.preventDefault(); onContextMenu(row.item, e.clientX, e.clientY); }) : undefined} className={`truncate text-left text-xs min-w-0 flex-1 cursor-pointer ${row.isSummary ? "font-semibold text-text-primary" : isHovered ? "text-text-primary" : "text-text-secondary hover:text-text-primary"}`} title={row.item.title}>{row.item.title}</button>
+      </div>
+
+      {/* Extra columns — individual fixed-width columns with dynamic widths */}
+      {extraCols && extraCols.map(col => (
+        <div key={col} className="flex items-center px-1 overflow-hidden flex-shrink-0 text-[10px] text-text-muted" style={{ width: colWidths?.[col] ?? GANTT_COL_INITIAL[col] }}>
+          {renderGanttSidebarCol(col, row.item, bg)}
+        </div>
+      ))}
+
       {p && <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse mr-2 flex-shrink-0" />}
     </div>
   );
 }
 
-function BRow({ row, top, onC, p, dp, iD, wasDragged, onDS, cD, isRowHovered, onHover, onLeave }: {
+function BRow({ row, top, onC, p, dp, iD, wasDragged, onDS, cD, isRowHovered, isSelected, onHover, onLeave, onContextMenu }: {
   row: GanttRow; top: number; onC: (i: WorkItem) => void; p?: boolean;
   dp: { left: number; width: number; yOffset?: number } | null; iD: boolean; wasDragged?: boolean;
   onDS: (e: React.MouseEvent, id: number, m: DragMode, l: number, w: number) => void; cD: boolean;
-  isRowHovered?: boolean; onHover?: () => void; onLeave?: () => void;
+  isRowHovered?: boolean; isSelected?: boolean; onHover?: () => void; onLeave?: () => void;
+  onContextMenu?: (item: WorkItem, x: number, y: number) => void;
 }) {
   const l = dp?.left ?? row.barLeft, w = dp?.width ?? row.barWidth;
   if (l === null || w === null) return null;
@@ -734,7 +882,7 @@ function BRow({ row, top, onC, p, dp, iD, wasDragged, onDS, cD, isRowHovered, on
     const tc = TYPE_COLOURS[row.item.workItemType] ?? bg;
     const midY = bt + bh / 2;
     return (
-      <button data-bar onClick={() => onC(row.item)} className="absolute cursor-pointer hover:opacity-80 transition-all"
+      <button data-bar onClick={() => onC(row.item)} onContextMenu={onContextMenu ? (e => { e.preventDefault(); onContextMenu(row.item, e.clientX, e.clientY); }) : undefined} className={`absolute cursor-pointer hover:opacity-80 transition-all ${isSelected ? "ring-2 ring-blue-500/50" : ""}`}
         style={{ left: `${l}%`, width: `${w}%`, top: midY - 1, height: 2, opacity: isRowHovered ? 0.9 : 0.6 }} title={`${row.item.workItemType}: ${row.item.title}`}
         onMouseEnter={onHover} onMouseLeave={onLeave}>
         {/* Thin line */}
@@ -755,13 +903,14 @@ function BRow({ row, top, onC, p, dp, iD, wasDragged, onDS, cD, isRowHovered, on
     : { left: `${l}%`, width: `${w}%`, top: bt, height: bh, backgroundColor: bg };
 
   return (
-    <div data-bar className={`absolute rounded-full flex items-center group/bar shadow-sm transition-all cursor-pointer ${iD ? "opacity-80 z-20" : ""}`}
-      style={{ ...barStyle, filter: isRowHovered ? "brightness(1.15)" : undefined }}
-      onMouseEnter={onHover} onMouseLeave={onLeave}>
+    <div data-bar className={`absolute rounded-full flex items-center group/bar shadow-sm transition-all ${iD ? "opacity-80 z-20 cursor-grabbing" : cD ? "cursor-grab" : "cursor-pointer"} ${isSelected ? "ring-2 ring-blue-500/50" : ""}`}
+      style={{ ...barStyle, filter: isRowHovered && !isSelected ? "brightness(1.15)" : undefined }}
+      onMouseEnter={onHover} onMouseLeave={onLeave}
+      onContextMenu={onContextMenu ? (e => { e.preventDefault(); onContextMenu(row.item, e.clientX, e.clientY); }) : undefined}>
       {cD && <div className="absolute left-0 top-0 bottom-0 cursor-ew-resize z-10 opacity-0 group-hover/bar:opacity-100 transition-opacity rounded-l-full"
         style={{ width: HW, backgroundColor: "rgba(255,255,255,0.15)" }}
         onMouseDown={e => onDS(e, row.item.id, "resize-left", row.barLeft!, row.barWidth!)} />}
-      <div className={`flex-1 h-full flex items-center px-3 truncate text-xs ${iD ? "cursor-grabbing" : "cursor-pointer"}`}
+      <div className={`flex-1 h-full flex items-center px-3 truncate text-xs ${iD ? "cursor-grabbing" : cD ? "cursor-grab" : "cursor-pointer"}`}
         onMouseDown={cD ? e => onDS(e, row.item.id, "move", row.barLeft!, row.barWidth!) : undefined}
         onClick={!cD ? () => onC(row.item) : undefined}
         title={`${row.item.title} (${row.item.state})${cD ? " \u2014 click to open, drag to move" : ""}`}>
@@ -814,58 +963,6 @@ function SummaryLabel({ title, color }: { title: string; color: string }) {
         </span>
       )}
     </>
-  );
-}
-
-function AddRowBtn({ row, onCreate }: { row: AddRow; onCreate?: (parentId: number, type: string) => void }) {
-  const [editing, setEditing] = useState(false);
-  const [title, setTitle] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  function handleCreate() {
-    if (title.trim() && onCreate) {
-      onCreate(row.parentId, row.childType);
-      // For now just trigger with a default title - we'll enhance this
-    }
-    setEditing(false);
-    setTitle("");
-  }
-
-  if (editing) {
-    return (
-      <div className="flex items-center border-b border-transparent" style={{ height: ROW_H, paddingLeft: row.depth * IND }}>
-        <div className="w-5" />
-        <input
-          ref={inputRef}
-          autoFocus
-          className="flex-1 linear-input text-xs mr-2"
-          placeholder={`Enter ${row.childType === "Product Backlog Item" ? "PBI" : row.childType.toLowerCase()} title...`}
-          value={title}
-          onChange={e => setTitle(e.target.value)}
-          onKeyDown={e => {
-            if (e.key === "Enter" && title.trim() && onCreate) {
-              onCreate(row.parentId, row.childType);
-              setEditing(false);
-              setTitle("");
-            }
-            if (e.key === "Escape") { setEditing(false); setTitle(""); }
-          }}
-          onBlur={() => { setEditing(false); setTitle(""); }}
-        />
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex items-center group" style={{ height: ROW_H, paddingLeft: row.depth * IND }}>
-      <div className="w-5" />
-      <button
-        onClick={() => onCreate?.(row.parentId, row.childType)}
-        className="text-[11px] text-text-muted hover:text-blue-400 transition-colors flex items-center gap-1 linear-btn"
-      >
-        <Plus size={10} weight="bold" />{row.label.replace("+ ", "")}
-      </button>
-    </div>
   );
 }
 

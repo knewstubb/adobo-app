@@ -2,13 +2,8 @@
 
 import { useEffect, useRef } from "react";
 import type { WorkItem } from "@/lib/types";
+import { CHILD_TYPE_MAP } from "@/lib/hierarchy";
 import { Plus, Trash } from "@phosphor-icons/react";
-
-const CHILD_TYPE_MAP: Record<string, string> = {
-  Initiative: "Epic",
-  Epic: "Feature",
-  Feature: "Product Backlog Item",
-};
 
 const TASK_PARENT_TYPES = new Set(["Product Backlog Item", "Bug"]);
 

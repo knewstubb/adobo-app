@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback, useLayoutEffect, useEffect } from "react";
 import type { WorkItem } from "@/lib/types";
 import { STATE_COLOURS } from "@/lib/types";
+import { CHILD_TYPE_MAP, SUMMARY_TYPES } from "@/lib/hierarchy";
 import { CaretRight, CaretDown, DotOutline, Asterisk, CrownSimple, Trophy, ListChecks, ClipboardText, Plus, Bug, Copy, Check } from "@phosphor-icons/react";
 
 interface ListViewProps {
@@ -14,6 +15,7 @@ interface ListViewProps {
   onContextMenu?: (item: WorkItem, x: number, y: number) => void;
   pendingIds?: Set<number>;
   showOrphans?: boolean;
+  visibleColumns?: ColKey[];
 }
 
 interface TreeNode {
@@ -61,13 +63,12 @@ function buildTree(items: WorkItem[], showOrphans: boolean): TreeNode[] {
       .sort((a, b) => a.localSortOrder - b.localSortOrder || a.id - b.id)
       .map(item => ({ item, children: buildNodes(item.id, depth + 1), depth }));
   }
-  const SUMMARY = new Set(["Initiative", "Epic", "Feature"]);
   const roots: TreeNode[] = [];
   const orphans: TreeNode[] = [];
   for (const item of items) {
     if (!item.parentId || !itemMap.has(item.parentId)) {
       const node: TreeNode = { item, children: buildNodes(item.id, 1), depth: 0 };
-      (SUMMARY.has(item.workItemType) || !item.parentId ? roots : orphans).push(node);
+      (SUMMARY_TYPES.has(item.workItemType) || !item.parentId ? roots : orphans).push(node);
     }
   }
   roots.sort((a, b) => a.item.localSortOrder - b.item.localSortOrder || a.item.id - b.item.id);
@@ -82,7 +83,7 @@ function flattenTree(nodes: TreeNode[], collapsed: Set<number>): TreeNode[] {
   return result;
 }
 
-export function ListView({ items, allItems, onItemClick, onReorder, onCreateItem, onContextMenu, pendingIds, showOrphans = false }: ListViewProps) {
+export function ListView({ items, allItems, onItemClick, onReorder, onCreateItem, onContextMenu, pendingIds, showOrphans = false, visibleColumns }: ListViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
   const [dragId, setDragId] = useState<number | null>(null);
@@ -159,7 +160,11 @@ export function ListView({ items, allItems, onItemClick, onReorder, onCreateItem
 
   const tree = buildTree(items, showOrphans);
   const rows = flattenTree(tree, collapsed);
-  const SUMMARY_TYPES = new Set(["Initiative", "Epic", "Feature"]);
+
+  // Filter columns by visibility settings (if provided)
+  const effectiveColOrder = visibleColumns
+    ? colOrder.filter(k => visibleColumns.includes(k))
+    : colOrder;
 
   function toggle(id: number) {
     setCollapsed(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
@@ -256,13 +261,6 @@ export function ListView({ items, allItems, onItemClick, onReorder, onCreateItem
     return <ListChecks size={12} className="text-blue-400" />;
   };
 
-  // Child type mapping: what can be created under each parent type
-  const CHILD_TYPE_MAP: Record<string, string> = {
-    Initiative: "Epic",
-    Epic: "Feature",
-    Feature: "Product Backlog Item",
-  };
-
   // Columns that are blank for summary types (Initiative, Epic, Feature)
   const SUMMARY_ONLY_COLS = new Set<ColKey>(["title", "order", "id"]);
 
@@ -320,7 +318,7 @@ export function ListView({ items, allItems, onItemClick, onReorder, onCreateItem
   }
 
   // Total row width for horizontal scroll
-  const totalWidth = colOrder.reduce((s, k) => s + widths[k], 0);
+  const totalWidth = effectiveColOrder.reduce((s, k) => s + widths[k], 0);
 
   return (
     <div ref={containerRef} className="flex-1 overflow-auto" style={{ cursor: isResizing ? "col-resize" : undefined }}>
@@ -333,7 +331,7 @@ export function ListView({ items, allItems, onItemClick, onReorder, onCreateItem
         >
           {/* Add column spacer */}
           <div className="w-6 flex-shrink-0" />
-          {colOrder.map((key, idx) => {
+          {effectiveColOrder.map((key, idx) => {
             const meta = COL_META[key];
             const showLeftLine = dropCol === key && dropSide === "left" && dragCol !== key;
             const showRightLine = dropCol === key && dropSide === "right" && dragCol !== key;
@@ -419,7 +417,7 @@ export function ListView({ items, allItems, onItemClick, onReorder, onCreateItem
                 {onCreateItem && CHILD_TYPE_MAP[item.workItemType] && (
                   <button
                     onClick={e => { e.stopPropagation(); onCreateItem(item.id, CHILD_TYPE_MAP[item.workItemType]); }}
-                    className="w-4 h-4 flex items-center justify-center rounded text-text-muted/0 group-hover:text-text-muted hover:text-blue-400 hover:bg-blue-500/10 transition-all"
+                    className="w-4 h-4 flex items-center justify-center rounded text-text-muted/0 group-hover:text-text-muted hover:text-blue-400 hover:bg-blue-500/10 transition-all cursor-pointer"
                     title={`New ${CHILD_TYPE_MAP[item.workItemType] === "Product Backlog Item" ? "PBI" : CHILD_TYPE_MAP[item.workItemType]}`}
                   >
                     <Plus size={10} weight="bold" />
@@ -427,7 +425,7 @@ export function ListView({ items, allItems, onItemClick, onReorder, onCreateItem
                 )}
               </div>
 
-              {colOrder.map(key => {
+              {effectiveColOrder.map(key => {
                 const meta = COL_META[key];
                 if (key === "title") {
                   return (
@@ -438,7 +436,7 @@ export function ListView({ items, allItems, onItemClick, onReorder, onCreateItem
                     >
                       <button
                         onClick={e => { e.stopPropagation(); if (hasChildren) toggle(item.id); }}
-                        className="w-4 h-4 flex items-center justify-center text-text-muted flex-shrink-0"
+                        className="w-4 h-4 flex items-center justify-center text-text-muted flex-shrink-0 cursor-pointer"
                       >
                         {hasChildren ? (isCollapsed ? <CaretRight size={10} /> : <CaretDown size={10} />) : <DotOutline size={8} className="text-border-default" />}
                       </button>

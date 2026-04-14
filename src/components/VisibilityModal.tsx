@@ -35,9 +35,9 @@ export function VisibilityModal({
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
   const [search, setSearch] = useState("");
 
-  // Filter to summary types only (Initiative > Epic > Feature)
+  // Filter to summary types only (Initiative > Epic > Feature), exclude Removed
   const summaryItems = useMemo(() => {
-    let filtered = items.filter(i => SUMMARY_TYPES.has(i.workItemType));
+    let filtered = items.filter(i => SUMMARY_TYPES.has(i.workItemType) && i.state !== "Removed");
     if (selectedAreaPath) {
       filtered = filtered.filter(i => i.areaPath?.startsWith(selectedAreaPath));
     }

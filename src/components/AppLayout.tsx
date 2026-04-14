@@ -26,9 +26,14 @@ import { DetailModal } from "./DetailModal";
 import { VisibilityModal } from "./VisibilityModal";
 import { ContextMenu } from "./ContextMenu";
 import { RemoveConfirmModal } from "./RemoveConfirmModal";
-import { Eye, ArrowsClockwise, GearSix, WifiSlash } from "@phosphor-icons/react";
+import { ArrowsClockwise, GearSix, WifiSlash, Sliders } from "@phosphor-icons/react";
 import { useOnlineStatus } from "@/hooks/useOnlineStatus";
 import { CredentialSettings } from "./CredentialSettings";
+import { CustomiseMenu } from "./CustomiseMenu";
+import { UndoRedoProvider } from "@/lib/undo-redo-context";
+import { UndoRedoToolbar } from "./UndoRedoToolbar";
+import type { HistoryEntry } from "@/lib/history-manager";
+import { type ColKey, readColumnSettings, GANTT_COL_KEY, LIST_COL_KEY, GANTT_DEFAULT_COLUMNS, LIST_DEFAULT_COLUMNS } from "./ColumnsMenu";
 import {
   updateField as clientUpdateField,
   updateTags as clientUpdateTags,
@@ -86,10 +91,10 @@ export function AppLayout({ initial }: { initial: AppData }) {
   const [viewMode, setViewMode] = useState<"timeline" | "kanban" | "list">("timeline");
   const scrollToTodayRef = useRef<(() => void) | null>(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [showViewMenu, setShowViewMenu] = useState(false);
+  const [showCustomiseMenu, setShowCustomiseMenu] = useState(false);
   const [showOrphans, setShowOrphans] = useState(false);
   const [showTasks, setShowTasks] = useState(false);
-  const viewMenuRef = useRef<HTMLDivElement>(null);
+  const customiseMenuRef = useRef<HTMLDivElement>(null);
   const [darkMode, setDarkMode] = useState(true);
   const settingsRef = useRef<HTMLDivElement>(null);
   const [showVisibilityModal, setShowVisibilityModal] = useState(false);
@@ -99,6 +104,19 @@ export function AppLayout({ initial }: { initial: AppData }) {
   const [contextMenu, setContextMenu] = useState<{ item: WorkItem; x: number; y: number } | null>(null);
   const [removeTarget, setRemoveTarget] = useState<WorkItem | null>(null);
   const [showCredentialSettings, setShowCredentialSettings] = useState(false);
+
+  // Ref to access recordAction from UndoRedoProvider
+  const recordActionRef = useRef<((entry: HistoryEntry) => void) | null>(null);
+
+  // Column visibility state per view
+  const [ganttVisibleCols, setGanttVisibleCols] = useState<ColKey[]>(() => {
+    if (typeof window !== "undefined") return readColumnSettings(GANTT_COL_KEY, GANTT_DEFAULT_COLUMNS).visibleColumns;
+    return GANTT_DEFAULT_COLUMNS;
+  });
+  const [listVisibleCols, setListVisibleCols] = useState<ColKey[]>(() => {
+    if (typeof window !== "undefined") return readColumnSettings(LIST_COL_KEY, LIST_DEFAULT_COLUMNS).visibleColumns;
+    return LIST_DEFAULT_COLUMNS;
+  });
 
   // Online/offline status
   const isOnline = useOnlineStatus();
@@ -139,17 +157,7 @@ export function AppLayout({ initial }: { initial: AppData }) {
     return () => document.removeEventListener("mousedown", handler);
   }, [showSettings]);
 
-  // Close view menu on click outside
-  useEffect(() => {
-    if (!showViewMenu) return;
-    const handler = (e: MouseEvent) => {
-      if (viewMenuRef.current && !viewMenuRef.current.contains(e.target as Node)) {
-        setShowViewMenu(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [showViewMenu]);
+  // (CustomiseMenu handles its own click-outside)
 
   async function refreshData() {
     const [workItems, iterations, teamMembers, savedViews, allTags, syncMetadata] =
@@ -319,50 +327,99 @@ export function AppLayout({ initial }: { initial: AppData }) {
 
   async function handleStateChange(newState: string) {
     if (!selectedItem) return;
+    const prevState = selectedItem.state;
     setPendingIds((s) => new Set(s).add(selectedItem.id));
-    const result = await clientUpdateField(selectedItem.id, "state", newState, selectedItem.state);
+    const result = await clientUpdateField(selectedItem.id, "state", newState, prevState);
     setPendingIds((s) => { const n = new Set(s); n.delete(selectedItem.id); return n; });
     if (result.success) {
       setSelectedItem({ ...selectedItem, state: newState });
       await refreshData();
+      recordActionRef.current?.({
+        id: crypto.randomUUID(),
+        type: "field-change",
+        timestamp: Date.now(),
+        workItemId: selectedItem.id,
+        field: "state",
+        previousValue: prevState,
+        newValue: newState,
+      });
     }
   }
 
   async function handleAssigneeChange(newAssignee: string | null) {
     if (!selectedItem) return;
+    const prevAssignee = selectedItem.assignedTo;
     setPendingIds((s) => new Set(s).add(selectedItem.id));
-    const result = await clientUpdateField(selectedItem.id, "assignedTo", newAssignee, selectedItem.assignedTo);
+    const result = await clientUpdateField(selectedItem.id, "assignedTo", newAssignee, prevAssignee);
     setPendingIds((s) => { const n = new Set(s); n.delete(selectedItem.id); return n; });
     if (result.success) {
       setSelectedItem({ ...selectedItem, assignedTo: newAssignee });
       await refreshData();
+      recordActionRef.current?.({
+        id: crypto.randomUUID(),
+        type: "field-change",
+        timestamp: Date.now(),
+        workItemId: selectedItem.id,
+        field: "assignedTo",
+        previousValue: prevAssignee,
+        newValue: newAssignee,
+      });
     }
   }
 
   async function handleTagsChange(newTags: string[]) {
     if (!selectedItem) return;
+    const prevTags = [...selectedItem.tags];
     setPendingIds((s) => new Set(s).add(selectedItem.id));
-    const result = await clientUpdateTags(selectedItem.id, newTags, selectedItem.tags);
+    const result = await clientUpdateTags(selectedItem.id, newTags, prevTags);
     setPendingIds((s) => { const n = new Set(s); n.delete(selectedItem.id); return n; });
     if (result.success) {
       setSelectedItem({ ...selectedItem, tags: newTags });
       await refreshData();
+      recordActionRef.current?.({
+        id: crypto.randomUUID(),
+        type: "tags-change",
+        timestamp: Date.now(),
+        workItemId: selectedItem.id,
+        previousValue: prevTags,
+        newValue: newTags,
+      });
     }
   }
 
   async function handleIterationChange(newIterationPath: string) {
     if (!selectedItem) return;
+    const prevIterationPath = selectedItem.iterationPath ?? "";
     setPendingIds((s) => new Set(s).add(selectedItem.id));
-    const result = await clientMoveToIteration(selectedItem.id, newIterationPath, selectedItem.iterationPath ?? "");
+    const result = await clientMoveToIteration(selectedItem.id, newIterationPath, prevIterationPath);
     setPendingIds((s) => { const n = new Set(s); n.delete(selectedItem.id); return n; });
     if (result.success) {
       setSelectedItem({ ...selectedItem, iterationPath: newIterationPath });
       await refreshData();
+      recordActionRef.current?.({
+        id: crypto.randomUUID(),
+        type: "field-change",
+        timestamp: Date.now(),
+        workItemId: selectedItem.id,
+        field: "iterationPath",
+        previousValue: prevIterationPath,
+        newValue: newIterationPath,
+      });
     }
   }
 
   async function handleReorder(itemId: number, newParentId: number | null, newSortOrder: number, previousSiblingId: number = 0, nextSiblingId: number = 0) {
     reorderingRef.current = true;
+    // Capture previous state before mutation
+    const item = data.workItems.find((i) => i.id === itemId);
+    const prevParentId = item?.parentId ?? null;
+    const prevSortOrders = new Map<number, number>();
+    for (const wi of data.workItems) {
+      if (wi.parentId === prevParentId || wi.parentId === newParentId || wi.id === itemId) {
+        prevSortOrders.set(wi.id, wi.localSortOrder);
+      }
+    }
+
     const renumbered = new Map<number, number>();
     setData(d => {
       // Get visible siblings at the target parent level (excluding the dragged item)
@@ -416,27 +473,42 @@ export function AppLayout({ initial }: { initial: AppData }) {
     );
 
     setPendingIds((s) => new Set(s).add(itemId));
-    const item = data.workItems.find((i) => i.id === itemId);
-    const prevParentId = item?.parentId ?? null;
     const result = await clientReorderItem(itemId, newParentId, newSortOrder, prevParentId, previousSiblingId, nextSiblingId);
     setPendingIds((s) => { const n = new Set(s); n.delete(itemId); return n; });
-    if (!result.success) await refreshData();
+    if (!result.success) {
+      await refreshData();
+    } else {
+      // Build compound action with previous/new sort orders
+      const records = Array.from(renumbered.entries()).map(([id, newOrder]) => ({
+        id: crypto.randomUUID(),
+        type: "reorder" as const,
+        timestamp: Date.now(),
+        workItemId: id,
+        previousValue: { parentId: id === itemId ? prevParentId : (data.workItems.find(i => i.id === id)?.parentId ?? null), sortOrder: prevSortOrders.get(id) ?? 0 },
+        newValue: { parentId: id === itemId ? newParentId : (data.workItems.find(i => i.id === id)?.parentId ?? null), sortOrder: newOrder },
+      }));
+      recordActionRef.current?.({
+        id: crypto.randomUUID(),
+        type: "reorder",
+        timestamp: Date.now(),
+        label: `reorder ${records.length} item${records.length === 1 ? "" : "s"}`,
+        records,
+      });
+    }
     reorderingRef.current = false;
   }
 
   async function handleToggleVisibility(itemId: number, visible: boolean) {
-    if (!activeViewId) return;
     if (visible) {
       setHiddenIds(prev => { const n = new Set(prev); n.delete(itemId); return n; });
-      await showItems(activeViewId, [itemId]);
+      if (activeViewId) await showItems(activeViewId, [itemId]);
     } else {
       setHiddenIds(prev => new Set(prev).add(itemId));
-      await hideItems(activeViewId, [itemId]);
+      if (activeViewId) await hideItems(activeViewId, [itemId]);
     }
   }
 
   async function handleToggleBranch(itemId: number, visible: boolean) {
-    if (!activeViewId) return;
     // Find all descendants
     const descendants: number[] = [itemId];
     function findDescendants(parentId: number) {
@@ -458,14 +530,19 @@ export function AppLayout({ initial }: { initial: AppData }) {
         current = data.workItems.find(i => i.id === current!.parentId);
       }
       setHiddenIds(prev => { const n = new Set(prev); for (const id of toShow) n.delete(id); return n; });
-      await showItems(activeViewId, toShow);
+      if (activeViewId) await showItems(activeViewId, toShow);
     } else {
       // Hide this item and all descendants
       setHiddenIds(prev => { const n = new Set(prev); for (const id of descendants) n.add(id); return n; });
-      await hideItems(activeViewId, descendants);
+      if (activeViewId) await hideItems(activeViewId, descendants);
     }
   }
 
+  // Keyboard shortcuts for item creation:
+  // Currently uses the browser's native `prompt()` dialog, which handles
+  // Enter (confirm) and Escape (cancel) automatically. If/when `prompt()`
+  // is replaced with an inline text input, the same Enter-to-confirm and
+  // Escape-to-cancel pattern used in ListView should be adopted here.
   async function handleCreateItem(parentId: number, workItemType: string) {
     const shortType = workItemType === "Product Backlog Item" ? "PBI" : workItemType;
     const title = prompt("Enter title for new " + shortType + ":");
@@ -507,6 +584,15 @@ export function AppLayout({ initial }: { initial: AppData }) {
         const { upsertWorkItems } = await import("@/lib/idb-cache");
         await upsertWorkItems([newItem]);
       } catch { /* non-critical */ }
+      // Record create-item action for undo
+      recordActionRef.current?.({
+        id: crypto.randomUUID(),
+        type: "create-item",
+        timestamp: Date.now(),
+        workItemId: result.id!,
+        previousValue: null,
+        newValue: result.id!,
+      });
     }
   }
 
@@ -515,16 +601,34 @@ export function AppLayout({ initial }: { initial: AppData }) {
     const prev = selectedItem.description ?? "";
     setSelectedItem({ ...selectedItem, description: newDesc });
     await clientUpdateDescription(selectedItem.id, newDesc, prev);
+    recordActionRef.current?.({
+      id: crypto.randomUUID(),
+      type: "description-change",
+      timestamp: Date.now(),
+      workItemId: selectedItem.id,
+      previousValue: prev,
+      newValue: newDesc,
+    });
   }
 
   async function handlePriorityChange(newPriority: number) {
     if (!selectedItem) return;
+    const prevPriority = selectedItem.priority;
     setPendingIds((s) => new Set(s).add(selectedItem.id));
-    const result = await clientUpdatePriority(selectedItem.id, newPriority, selectedItem.priority);
+    const result = await clientUpdatePriority(selectedItem.id, newPriority, prevPriority);
     setPendingIds((s) => { const n = new Set(s); n.delete(selectedItem.id); return n; });
     if (result.success) {
       setSelectedItem({ ...selectedItem, priority: newPriority });
       await refreshData();
+      recordActionRef.current?.({
+        id: crypto.randomUUID(),
+        type: "field-change",
+        timestamp: Date.now(),
+        workItemId: selectedItem.id,
+        field: "priority",
+        previousValue: prevPriority,
+        newValue: newPriority,
+      });
     }
   }
 
@@ -533,6 +637,14 @@ export function AppLayout({ initial }: { initial: AppData }) {
     const prev = selectedItem.acceptanceCriteria ?? "";
     setSelectedItem({ ...selectedItem, acceptanceCriteria: newAC });
     await clientUpdateAcceptanceCriteria(selectedItem.id, newAC, prev);
+    recordActionRef.current?.({
+      id: crypto.randomUUID(),
+      type: "ac-change",
+      timestamp: Date.now(),
+      workItemId: selectedItem.id,
+      previousValue: prev,
+      newValue: newAC,
+    });
   }
 
   async function handleRemoveItems(itemIds: number[]) {
@@ -548,8 +660,27 @@ export function AppLayout({ initial }: { initial: AppData }) {
     }));
     setRemoveTarget(null);
     const result = await clientRemoveItems(itemIds, prevStates);
-    if (!result.success) await refreshData();
-    else await refreshData();
+    if (!result.success) {
+      await refreshData();
+    } else {
+      await refreshData();
+      // Record remove-items compound action
+      const records = itemIds.map(id => ({
+        id: crypto.randomUUID(),
+        type: "remove-items" as const,
+        timestamp: Date.now(),
+        workItemId: id,
+        previousValue: prevStates[id] ?? "New",
+        newValue: "Removed",
+      }));
+      recordActionRef.current?.({
+        id: crypto.randomUUID(),
+        type: "remove-items",
+        timestamp: Date.now(),
+        label: `remove ${itemIds.map(id => `#${id}`).join(", ")}`,
+        records,
+      });
+    }
   }
 
   function handleContextMenu(item: WorkItem, x: number, y: number) {
@@ -557,6 +688,12 @@ export function AppLayout({ initial }: { initial: AppData }) {
   }
 
   async function handleScheduleChange(itemId: number, startDate: Date, endDate: Date, iterationPath: string) {
+    // Capture previous values before mutation
+    const item = data.workItems.find((i) => i.id === itemId);
+    const prevStartDate = item?.localStartDate?.toISOString().split("T")[0] ?? "";
+    const prevEndDate = item?.localEndDate?.toISOString().split("T")[0] ?? "";
+    const prevIterPath = item?.iterationPath ?? "";
+
     // Optimistically update local state immediately (no snap-back)
     setData(d => ({
       ...d,
@@ -568,16 +705,41 @@ export function AppLayout({ initial }: { initial: AppData }) {
       } : i),
     }));
     setPendingIds((s) => new Set(s).add(itemId));
-    const item = data.workItems.find((i) => i.id === itemId);
-    const prevIterPath = item?.iterationPath ?? "";
     const startStr = startDate.toISOString().split("T")[0];
     const endStr = endDate.toISOString().split("T")[0];
     const result = await clientUpdateSchedule(itemId, startStr, endStr, iterationPath, prevIterPath);
     setPendingIds((s) => { const n = new Set(s); n.delete(itemId); return n; });
-    if (!result.success) await refreshData(); // Only refresh on failure to revert
+    if (!result.success) {
+      await refreshData(); // Only refresh on failure to revert
+    } else {
+      // Record schedule-change compound action
+      const ts = Date.now();
+      const records = [
+        {
+          id: crypto.randomUUID(),
+          type: "schedule-change" as const,
+          timestamp: ts,
+          workItemId: itemId,
+          previousValue: { startDate: prevStartDate, endDate: prevEndDate, iterationPath: prevIterPath },
+          newValue: { startDate: startStr, endDate: endStr, iterationPath: iterationPath || prevIterPath },
+        },
+      ];
+      recordActionRef.current?.({
+        id: crypto.randomUUID(),
+        type: "schedule-change",
+        timestamp: ts,
+        label: `schedule change on #${itemId}`,
+        records,
+      });
+    }
   }
 
   return (
+    <UndoRedoProvider
+      refreshData={refreshData}
+      onError={(msg) => console.error("[undo-redo]", msg)}
+      recordActionRef={recordActionRef}
+    >
     <div className="flex flex-col h-screen bg-surface-app text-text-primary">
       {/* Offline Banner */}
       {!isOnline && (
@@ -607,7 +769,7 @@ export function AppLayout({ initial }: { initial: AppData }) {
             onClick={() => setViewMode("timeline")}
             className={`text-xs px-2.5 py-1 transition-colors ${viewMode === "timeline" ? "bg-blue-500/15 text-blue-400" : "text-text-muted hover:text-text-secondary"}`}
           >
-            Timeline
+            Gantt
           </button>
           <button
             onClick={() => {
@@ -651,53 +813,33 @@ export function AppLayout({ initial }: { initial: AppData }) {
               </button>
             </>
           )}
-          <div ref={viewMenuRef} className="relative">
+          <UndoRedoToolbar />
+          <div ref={customiseMenuRef} className="relative">
             <button
-              onClick={() => setShowViewMenu(v => !v)}
-              className="text-xs px-2 py-1 rounded border border-border-focus text-text-muted hover:border-border-button linear-btn"
+              onClick={() => setShowCustomiseMenu(v => !v)}
+              className="text-xs px-2 py-1 rounded border border-border-focus text-text-muted hover:border-border-button linear-btn flex items-center gap-1"
             >
-              View
+              <Sliders size={14} /> Customise
             </button>
-            {showViewMenu && (
-              <div className="absolute z-50 mt-1 bg-surface-elevated border border-border-modal rounded-lg shadow-[0px_4px_24px_0px_rgba(0,0,0,0.2)] py-2 px-3 min-w-[180px]">
-                <div className="flex items-center justify-between gap-4 py-1.5">
-                  <span className="text-xs text-text-secondary">Weekends</span>
-                  <button onClick={() => setShowWeekends(v => !v)}
-                    className={`relative w-8 h-4 rounded-full transition-colors ${showWeekends ? "bg-blue-600" : "bg-surface-button"}`}>
-                    <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${showWeekends ? "left-4" : "left-0.5"}`} />
-                  </button>
-                </div>
-                <div className="flex items-center justify-between gap-4 py-1.5">
-                  <span className="text-xs text-text-secondary">Show Done</span>
-                  <button onClick={() => setShowDone(v => !v)}
-                    className={`relative w-8 h-4 rounded-full transition-colors ${showDone ? "bg-blue-600" : "bg-surface-button"}`}>
-                    <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${showDone ? "left-4" : "left-0.5"}`} />
-                  </button>
-                </div>
-                <div className="flex items-center justify-between gap-4 py-1.5">
-                  <span className="text-xs text-text-secondary">Show Orphans</span>
-                  <button onClick={() => setShowOrphans(v => !v)}
-                    className={`relative w-8 h-4 rounded-full transition-colors ${showOrphans ? "bg-blue-600" : "bg-surface-button"}`}>
-                    <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${showOrphans ? "left-4" : "left-0.5"}`} />
-                  </button>
-                </div>
-                <div className="flex items-center justify-between gap-4 py-1.5">
-                  <span className="text-xs text-text-secondary">Show Tasks</span>
-                  <button onClick={() => setShowTasks(v => !v)}
-                    className={`relative w-8 h-4 rounded-full transition-colors ${showTasks ? "bg-blue-600" : "bg-surface-button"}`}>
-                    <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${showTasks ? "left-4" : "left-0.5"}`} />
-                  </button>
-                </div>
-              </div>
-            )}
+            <CustomiseMenu
+              open={showCustomiseMenu}
+              onClose={() => setShowCustomiseMenu(false)}
+              onOpenVisibility={() => setShowVisibilityModal(true)}
+              viewMode={viewMode}
+              onColumnsChange={(cols) => {
+                if (viewMode === "list") setListVisibleCols(cols);
+                else setGanttVisibleCols(cols);
+              }}
+              showWeekends={showWeekends}
+              onToggleWeekends={() => setShowWeekends(v => !v)}
+              showDone={showDone}
+              onToggleDone={() => setShowDone(v => !v)}
+              showOrphans={showOrphans}
+              onToggleOrphans={() => setShowOrphans(v => !v)}
+              showTasks={showTasks}
+              onToggleTasks={() => setShowTasks(v => !v)}
+            />
           </div>
-          <button
-            onClick={() => setShowVisibilityModal(true)}
-            className="text-xs px-2 py-1 rounded text-text-muted hover:text-text-primary hover:bg-surface-button linear-btn flex items-center gap-1"
-            title="Configure which items are visible"
-          >
-            <Eye size={14} /> Visibility
-          </button>
           <SyncStatus metadata={data.syncMetadata} disabled={!isOnline} onSyncComplete={refreshData} />
           <div ref={settingsRef} className="relative border-l border-border-default pl-2 ml-1">
             <button
@@ -749,6 +891,7 @@ export function AppLayout({ initial }: { initial: AppData }) {
           zoomWidth={zoomWidth}
           onScrollToTodayRef={scrollToTodayRef}
           onZoom={(delta) => setVisibleSprintCount(v => Math.max(1, Math.min(sortedIterations.length, v + delta)))}
+          visibleColumns={ganttVisibleCols}
         />
       )}
 
@@ -847,6 +990,7 @@ export function AppLayout({ initial }: { initial: AppData }) {
           onCreateItem={handleCreateItem}
           onContextMenu={handleContextMenu}
           pendingIds={pendingIds}
+          visibleColumns={listVisibleCols}
         />
       )}
 
@@ -924,5 +1068,6 @@ export function AppLayout({ initial }: { initial: AppData }) {
         />
       )}
     </div>
+    </UndoRedoProvider>
   );
 }

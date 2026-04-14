@@ -11,10 +11,7 @@
 import type { WorkItem, Iteration } from "./types";
 import type { TimelineRange } from "./timeline-positioning";
 import { dateToPercent } from "./timeline-positioning";
-
-/** The hierarchy levels in display order */
-const SUMMARY_TYPES = new Set(["Initiative", "Epic", "Feature"]);
-const LEAF_TYPES = new Set(["Product Backlog Item", "Bug", "Task", "User Story"]);
+import { SUMMARY_TYPES } from "./hierarchy";
 
 export interface GanttRow {
   item: WorkItem;
@@ -27,16 +24,7 @@ export interface GanttRow {
   barWidth: number | null;
 }
 
-/** Placeholder row for "+ New" buttons */
-export interface AddRow {
-  type: "add";
-  parentId: number;
-  childType: string;
-  label: string;
-  depth: number;
-}
-
-export type FlatRow = { type: "item"; row: GanttRow } | AddRow;
+export type FlatRow = { type: "item"; row: GanttRow };
 
 /**
  * Build a hierarchical tree of GanttRows from flat work items.
@@ -171,22 +159,8 @@ function computeChildBounds(rows: GanttRow[]): { left: number | null; width: num
   return { left: minLeft, width: maxRight - minLeft };
 }
 
-/** Child type mapping: what type of child can be added under each parent type */
-const CHILD_TYPE_MAP: Record<string, string> = {
-  Initiative: "Epic",
-  Epic: "Feature",
-  Feature: "Product Backlog Item",
-};
-
-const CHILD_LABEL_MAP: Record<string, string> = {
-  Epic: "+ New Epic",
-  Feature: "+ New Feature",
-  "Product Backlog Item": "+ New PBI",
-};
-
 /**
  * Flatten the tree into a list of visible rows, respecting collapsed state.
- * Includes "+ New" placeholder rows after each group of children.
  */
 export function flattenGanttTree(
   rows: GanttRow[],
@@ -199,17 +173,6 @@ export function flattenGanttTree(
     if (!collapsedIds.has(row.item.id)) {
       for (const child of row.children) {
         walk(child);
-      }
-      // Add "+ New" row after children if this is a summary row
-      const childType = CHILD_TYPE_MAP[row.item.workItemType];
-      if (childType && CHILD_LABEL_MAP[childType]) {
-        result.push({
-          type: "add",
-          parentId: row.item.id,
-          childType,
-          label: CHILD_LABEL_MAP[childType],
-          depth: row.depth + 1,
-        });
       }
     }
   }
